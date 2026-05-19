@@ -293,7 +293,15 @@ def run_manual_mode(
                     log.exception("on_capture handler failed: %s", e)
                 if stop_after is not None and processed_count >= stop_after:
                     return
-            time.sleep(0.5)
+            # IMPORTANT: use Playwright's wait, not time.sleep — sync_playwright
+            # only delivers `request` events while the main thread is inside a
+            # Playwright wait call. time.sleep would starve the event loop and
+            # batch all captures until Ctrl+C.
+            try:
+                page.wait_for_timeout(500)
+            except Exception:
+                # Page closed; loop continues to check len(context.pages)
+                time.sleep(0.5)
     except KeyboardInterrupt:
         log.info("Interrupted by user")
         return
