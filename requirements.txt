@@ -1,0 +1,3 @@
+playwright>=1.40
+notion-client>=2.2
+python-dotenv>=1.0
