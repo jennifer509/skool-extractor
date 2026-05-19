@@ -211,11 +211,16 @@ def run_manual_mode(
     - `stop_after` distinct lessons have been captured.
     """
     seen_playback_ids: set[str] = set()
+    pending: list[dict] = []
+    processed_count = 0
     page = context.new_page()
     page.goto(classroom_url, wait_until="domcontentloaded", timeout=60000)
     log.info("Manual mode active. Click lessons in the browser. Ctrl+C to stop.")
 
     def on_request(req):
+        # Lightweight handler: just capture URL + playback id. Title is
+        # resolved later from the main loop so we can wait for the page
+        # to render (the request fires before <h1>/<title> are populated).
         if "stream.video.skool.com" not in req.url or ".m3u8" not in req.url:
             return
         if "token=" not in req.url:
@@ -227,45 +232,68 @@ def run_manual_mode(
         if pid in seen_playback_ids:
             return
         seen_playback_ids.add(pid)
-        current_url = ""
-        current_title = ""
         try:
-            current_url = req.frame.page.url
-            current_title = req.frame.page.title().strip()
+            page_ref = req.frame.page
         except Exception:
-            pass
-        lesson = LessonRef(
-            order=len(seen_playback_ids),
-            title=current_title or f"lesson-{len(seen_playback_ids)}",
-            url=current_url,
-        )
-        captured = CapturedLesson(
-            lesson=lesson, mux_url=req.url, mux_playback_id=pid
-        )
-        log.info(
-            "[%d] Captured: %s (%s)",
-            len(seen_playback_ids),
-            lesson.title[:60],
-            pid,
-        )
-        try:
-            on_capture(captured)
-        except Exception as e:
-            log.exception("on_capture handler failed: %s", e)
+            page_ref = None
+        pending.append({"mux_url": req.url, "pid": pid, "page": page_ref})
+        log.info("[%d] Mux URL captured — resolving title…", len(seen_playback_ids))
 
-    # Attach to context so all pages in the context are watched
+    def _resolve_title_and_url(page_ref) -> tuple[str, str]:
+        if page_ref is None:
+            return ("", "")
+        try:
+            # Give the SPA a moment to set h1/title after navigating
+            page_ref.wait_for_timeout(1500)
+            title = page_ref.evaluate(
+                "() => (document.querySelector('h1')?.textContent || document.title || '').trim()"
+            )
+            return (title or "", page_ref.url or "")
+        except Exception as e:
+            log.debug("title resolution failed: %s", e)
+            try:
+                return ("", page_ref.url or "")
+            except Exception:
+                return ("", "")
+
     context.on("request", on_request)
 
-    # Wait until user closes context or stop_after reached
     try:
         while True:
-            if stop_after is not None and len(seen_playback_ids) >= stop_after:
+            if stop_after is not None and processed_count >= stop_after:
                 log.info("Reached stop_after=%d, exiting manual mode", stop_after)
                 return
             if len(context.pages) == 0:
                 log.info("Browser closed, exiting manual mode")
                 return
-            time.sleep(1)
+            # Drain any pending captures
+            while pending:
+                item = pending.pop(0)
+                processed_count += 1
+                title, url = _resolve_title_and_url(item["page"])
+                lesson = LessonRef(
+                    order=processed_count,
+                    title=title or f"lesson-{processed_count}",
+                    url=url,
+                )
+                captured = CapturedLesson(
+                    lesson=lesson,
+                    mux_url=item["mux_url"],
+                    mux_playback_id=item["pid"],
+                )
+                log.info(
+                    "[%d] Captured: %s (%s)",
+                    processed_count,
+                    lesson.title[:80],
+                    item["pid"],
+                )
+                try:
+                    on_capture(captured)
+                except Exception as e:
+                    log.exception("on_capture handler failed: %s", e)
+                if stop_after is not None and processed_count >= stop_after:
+                    return
+            time.sleep(0.5)
     except KeyboardInterrupt:
         log.info("Interrupted by user")
         return

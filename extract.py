@@ -31,6 +31,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -80,7 +81,8 @@ def _course_title_from_url(url: str) -> str:
 
 def extract_course(args: argparse.Namespace) -> None:
     course_url = args.course_url.rstrip("/")
-    course_slug = course_url.split("/")[-1]
+    # Strip query string before deriving the slug ("classroom/abc?md=xyz" → "abc")
+    course_slug = urlparse(course_url).path.rstrip("/").split("/")[-1] or "course"
     course_title = args.course_title or _course_title_from_url(course_url)
     notes_root = Path(args.notes_root).expanduser().resolve()
     course_dir = notes_root / course_slug
